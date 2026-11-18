@@ -45,6 +45,9 @@ const registerResponseSchema = z.object({
 });
 
 const registerSchema = {
+  tags: ['auth'],
+  summary: 'Register a new user',
+  description: 'Creates an account and sends an email verification link (console mailer in Phase 1).',
   body: registerBodySchema,
   response: {
     201: registerResponseSchema,
@@ -69,6 +72,10 @@ const loginResponseSchema = z.object({
 });
 
 const loginSchema = {
+  tags: ['auth'],
+  summary: 'Login with email and password',
+  description:
+    'Issues an access JWT and sets an HttpOnly refresh cookie. Blocks unverified, locked, and disabled accounts.',
   body: loginBodySchema,
   response: {
     200: loginResponseSchema,
@@ -88,6 +95,8 @@ const emailBodySchema = z.object({
 });
 
 const verifyEmailSchema = {
+  tags: ['auth'],
+  summary: 'Verify email with one-time token',
   body: tokenBodySchema,
   response: {
     200: messageSchema,
@@ -96,6 +105,9 @@ const verifyEmailSchema = {
 };
 
 const resendVerificationSchema = {
+  tags: ['auth'],
+  summary: 'Resend email verification link',
+  description: 'Opaque response — does not reveal whether the email exists.',
   body: emailBodySchema,
   response: {
     200: messageSchema,
@@ -103,6 +115,9 @@ const resendVerificationSchema = {
 };
 
 const forgotPasswordSchema = {
+  tags: ['auth'],
+  summary: 'Request password reset link',
+  description: 'Opaque response — does not reveal whether the email exists.',
   body: emailBodySchema,
   response: {
     200: messageSchema,
@@ -110,6 +125,8 @@ const forgotPasswordSchema = {
 };
 
 const resetPasswordSchema = {
+  tags: ['auth'],
+  summary: 'Reset password with one-time token',
   body: z.object({
     token: z.string().min(1),
     password: passwordSchema,
@@ -121,6 +138,9 @@ const resetPasswordSchema = {
 };
 
 const changePasswordSchema = {
+  tags: ['auth'],
+  summary: 'Change password (authenticated)',
+  security: [{ bearerAuth: [] }],
   body: z.object({
     currentPassword: z.string().min(8),
     newPassword: passwordSchema,
@@ -140,6 +160,9 @@ const refreshResponseSchema = z.object({
 });
 
 const refreshSchema = {
+  tags: ['auth'],
+  summary: 'Rotate refresh cookie and issue new access token',
+  description: 'Requires the HttpOnly refreshToken cookie. Try-it-out in Swagger is limited for cookies.',
   response: {
     200: refreshResponseSchema,
     401: errorSchema,
@@ -149,6 +172,9 @@ const refreshSchema = {
 
 // Logout response validation
 const logoutSchema = {
+  tags: ['auth'],
+  summary: 'Logout via refresh cookie',
+  description: 'Revokes the current refresh session if present. Works even if the access token expired.',
   response: {
     200: messageSchema,
     401: errorSchema,
@@ -171,6 +197,9 @@ const sessionsListResponseSchema = z.object({
 });
 
 const sessionsListSchema = {
+  tags: ['sessions'],
+  summary: 'List my active refresh sessions',
+  security: [{ bearerAuth: [] }],
   response: {
     200: sessionsListResponseSchema,
     401: errorSchema,
@@ -182,6 +211,9 @@ const sessionIdParamsSchema = z.object({
 });
 
 const revokeOneSchema = {
+  tags: ['sessions'],
+  summary: 'Revoke one refresh session',
+  security: [{ bearerAuth: [] }],
   params: sessionIdParamsSchema,
   response: {
     200: messageSchema,
@@ -191,6 +223,9 @@ const revokeOneSchema = {
 };
 
 const revokeOthersSchema = {
+  tags: ['sessions'],
+  summary: 'Revoke all other refresh sessions',
+  security: [{ bearerAuth: [] }],
   response: {
     200: messageSchema,
     401: errorSchema,

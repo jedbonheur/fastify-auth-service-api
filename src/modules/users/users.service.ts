@@ -27,6 +27,9 @@ const updateNameBodySchema = z.object({
 });
 
 const meSchema = {
+    tags: ['user'],
+    summary: 'Get current user',
+    security: [{ bearerAuth: [] }],
     response: {
         200: meResponseSchema,
         404: errorSchema,
@@ -34,6 +37,9 @@ const meSchema = {
 };
 
 const deleteUserSchema = {
+    tags: ['user'],
+    summary: 'Delete current user',
+    security: [{ bearerAuth: [] }],
     response: {
         200: messageSchema,
         404: errorSchema,
@@ -41,6 +47,9 @@ const deleteUserSchema = {
 };
 
 const updateNameSchema = {
+    tags: ['user'],
+    summary: 'Update current user name',
+    security: [{ bearerAuth: [] }],
     body: updateNameBodySchema,
     response: {
         200: messageSchema,
