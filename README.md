@@ -187,6 +187,7 @@ npm run dev
 
 - App: `http://127.0.0.1:3000`
 - Health: `GET /health`
+- Interactive OpenAPI docs: `http://127.0.0.1:3000/docs`
 - Verification / reset links are printed in the **server console** by `ConsoleMailer`
 
 ```bash

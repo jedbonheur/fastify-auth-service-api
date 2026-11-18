@@ -30,6 +30,8 @@ const envSchema = z.object({
     CORS_ORIGIN: z.string().min(1),
     // Base URL used in verification / reset links (usually the frontend)
     APP_PUBLIC_URL: z.string().url().default('http://localhost:5173'),
+    MAX_FAILED_LOGINS: z.coerce.number().int().positive().default(5),
+    ACCOUNT_LOCK_MINUTES: z.coerce.number().int().positive().default(15),
 })
 
 const parsed = envSchema.safeParse(process.env);

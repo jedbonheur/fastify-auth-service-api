@@ -1,0 +1,31 @@
+enum AuditEventType {
+  login_success
+  login_failure
+  account_locked
+  logout
+  refresh_reuse
+  session_revoke
+  session_revoke_others
+  password_reset
+  password_change
+  email_verified
+}
+
+// Append-only security trail — insert in app code, never update/delete
+model AuditEvent {
+  id        String         @id @default(uuid())
+  // Optional: unknown-email login failures have no user row yet
+  userId    String?
+  user      User?          @relation(fields: [userId], references: [id], onDelete: SetNull)
+  email     String?        @db.VarChar(255)
+  event     AuditEventType
+  ip        String?        @db.VarChar(64)
+  userAgent String?        @db.VarChar(512)
+  // Extra context (session id, reason) — never passwords or raw tokens
+  meta      Json?
+  createdAt DateTime       @default(now())
+
+  @@index([userId, createdAt])
+  @@index([event, createdAt])
+  @@index([email, createdAt])
+}

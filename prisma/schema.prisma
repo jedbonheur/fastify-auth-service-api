@@ -7,20 +7,28 @@ datasource db {
   provider = "postgresql"
 }
 
+// Finite account states — DB rejects any other string
 enum UserStatus {
   active
+  locked
+  disabled
 }
 
 model User {
-  id              String           @id @default(uuid())
-  firstName       String           @db.VarChar(255)
-  lastName        String           @db.VarChar(255)
-  email           String           @unique @db.VarChar(255)
-  passwordHash    String           @db.VarChar(255)
-  emailVerifiedAt DateTime?
-  status          UserStatus       @default(active)
-  refreshSessions RefreshSession[]
-  oneTimeTokens   OneTimeToken[]
-  createdAt       DateTime         @default(now()) @db.Timestamp
-  updatedAt       DateTime         @updatedAt @db.Timestamp
+  id               String           @id @default(uuid())
+  firstName        String           @db.VarChar(255)
+  lastName         String           @db.VarChar(255)
+  email            String           @unique @db.VarChar(255)
+  passwordHash     String           @db.VarChar(255)
+  emailVerifiedAt  DateTime?
+  status           UserStatus       @default(active)
+  // Lockout: how many bad passwords in a row
+  failedLoginCount Int              @default(0)
+  // Lockout: when the temporary lock expires (null = not time-locked)
+  lockedUntil      DateTime?
+  refreshSessions  RefreshSession[]
+  oneTimeTokens    OneTimeToken[]
+  auditEvents      AuditEvent[]
+  createdAt        DateTime         @default(now()) @db.Timestamp
+  updatedAt        DateTime         @updatedAt @db.Timestamp
 }
