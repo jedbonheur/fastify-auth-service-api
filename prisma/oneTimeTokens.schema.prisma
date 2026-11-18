@@ -1,0 +1,19 @@
+enum OneTimeTokenType {
+  email_verify
+  password_reset
+}
+
+model OneTimeToken {
+  id        String           @id @default(uuid())
+  userId    String
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type      OneTimeTokenType
+  // sha256 of the raw token sent to the user
+  tokenHash String           @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime         @default(now())
+
+  @@index([userId, type])
+}

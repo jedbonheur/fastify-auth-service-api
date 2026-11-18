@@ -1,0 +1,26 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserStatus {
+  active
+}
+
+model User {
+  id              String           @id @default(uuid())
+  firstName       String           @db.VarChar(255)
+  lastName        String           @db.VarChar(255)
+  email           String           @unique @db.VarChar(255)
+  passwordHash    String           @db.VarChar(255)
+  emailVerifiedAt DateTime?
+  status          UserStatus       @default(active)
+  refreshSessions RefreshSession[]
+  oneTimeTokens   OneTimeToken[]
+  createdAt       DateTime         @default(now()) @db.Timestamp
+  updatedAt       DateTime         @updatedAt @db.Timestamp
+}

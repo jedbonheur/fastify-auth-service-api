@@ -1,0 +1,17 @@
+# Ignore dependency folders
+node_modules/
+venv/
+
+# Prisma generated client
+src/generated/
+
+# Ignore environment variables and logs
+.env
+*.log
+
+# Local planning (do not commit)
+IMPLEMENTATION_PLAN.md
+
+# Ignore OS-generated files
+.DS_Store
+Thumbs.db
