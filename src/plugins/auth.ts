@@ -1,6 +1,7 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import type { FastifyJwtNamespace } from '@fastify/jwt';
 import fp from 'fastify-plugin';
+import { AppError, ErrorCodes } from '../lib/errors.js';
 
 type AccessJwt = FastifyJwtNamespace<{
   namespace: 'access';
@@ -45,10 +46,15 @@ const authPlugin = async (fastify: FastifyInstance) => {
       await request.accessJwtVerify();
 
       if (request.user.typ !== 'access') {
-        return reply.status(401).send({ message: 'Invalid token type' });
+        throw new AppError(
+            ErrorCodes.AUTH_INVALID_TOKEN_TYPE,
+            'Invalid token type',
+            401,
+          );
       }
-    } catch {
-      return reply.status(401).send({ message: 'Unauthorized' });
+    } catch (error) {
+        if (error instanceof AppError) throw error;
+        throw new AppError(ErrorCodes.AUTH_UNAUTHORIZED, 'Unauthorized', 401);
     }
   });
 };

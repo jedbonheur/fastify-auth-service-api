@@ -17,6 +17,7 @@ import { env } from './config/env.js';
 import { usersRoutes } from './modules/users/users.service.js';
 import authPlugin from './plugins/auth.js';
 import mailerPlugin from './plugins/mailer.js';
+import errorHandlerPlugin from './plugins/error-handler.js';
 
 export function buildApp() {
   const app = Fastify({
@@ -52,6 +53,8 @@ export function buildApp() {
   });
 
   app.register(cookie);
+
+  app.register(errorHandlerPlugin);
 
   // Access JWT — short-lived, used by authenticate / Bearer header
   app.register(fjwt, {

@@ -5,12 +5,19 @@ import { z } from 'zod';
 import { env } from '../../config/env.js';
 import { createHash, randomBytes } from 'node:crypto';
 import '@fastify/cookie';
+import { AppError, ErrorCodes } from '../../lib/errors.js';
+import { recordAudit } from './audit.js';
 
 const EMAIL_VERIFY_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000; // 1h
 
 // Shared response schemas
 export const messageSchema = z.object({
+  message: z.string(),
+});
+
+export const errorSchema = z.object({
+  code: z.string(),
   message: z.string(),
 });
 
@@ -41,8 +48,8 @@ const registerSchema = {
   body: registerBodySchema,
   response: {
     201: registerResponseSchema,
-    400: messageSchema,
-    409: messageSchema,
+    400: errorSchema,
+    409: errorSchema,
   },
 };
 
@@ -65,9 +72,9 @@ const loginSchema = {
   body: loginBodySchema,
   response: {
     200: loginResponseSchema,
-    401: messageSchema,
-    403: messageSchema,
-    500: messageSchema,
+    401: errorSchema,
+    403: errorSchema,
+    500: errorSchema,
   },
 };
 
@@ -84,7 +91,7 @@ const verifyEmailSchema = {
   body: tokenBodySchema,
   response: {
     200: messageSchema,
-    400: messageSchema,
+    400: errorSchema,
   },
 };
 
@@ -109,7 +116,7 @@ const resetPasswordSchema = {
   }),
   response: {
     200: messageSchema,
-    400: messageSchema,
+    400: errorSchema,
   },
 };
 
@@ -120,8 +127,8 @@ const changePasswordSchema = {
   }),
   response: {
     200: messageSchema,
-    400: messageSchema,
-    401: messageSchema,
+    400: errorSchema,
+    401: errorSchema,
   },
 };
 
@@ -135,7 +142,8 @@ const refreshResponseSchema = z.object({
 const refreshSchema = {
   response: {
     200: refreshResponseSchema,
-    401: messageSchema,
+    401: errorSchema,
+    403: errorSchema,
   },
 };
 
@@ -143,7 +151,7 @@ const refreshSchema = {
 const logoutSchema = {
   response: {
     200: messageSchema,
-    401: messageSchema,
+    401: errorSchema,
   },
 };
 
@@ -165,7 +173,7 @@ const sessionsListResponseSchema = z.object({
 const sessionsListSchema = {
   response: {
     200: sessionsListResponseSchema,
-    401: messageSchema,
+    401: errorSchema,
   },
 };
 
@@ -177,15 +185,15 @@ const revokeOneSchema = {
   params: sessionIdParamsSchema,
   response: {
     200: messageSchema,
-    401: messageSchema,
-    404: messageSchema,
+    401: errorSchema,
+    404: errorSchema,
   },
 };
 
 const revokeOthersSchema = {
   response: {
     200: messageSchema,
-    401: messageSchema,
+    401: errorSchema,
   },
 };
 
@@ -330,10 +338,15 @@ export async function authRoutes(fastify: FastifyInstance) {
           message: "User created successfully",
         });
       } catch (error: any) {
+        if (error instanceof AppError) throw error;
         if (error.code === 'P2002') {
-          return reply.status(409).send({ message: "User already exists, try a different email" });
+          throw new AppError(
+            ErrorCodes.AUTH_EMAIL_TAKEN,
+            'User already exists, try a different email',
+            409,
+          );
         }
-        return reply.status(400).send({ message: "Failed to create user" });
+        throw new AppError(ErrorCodes.BAD_REQUEST, 'Failed to create user', 400);
       }
     }
   );
@@ -349,27 +362,123 @@ export async function authRoutes(fastify: FastifyInstance) {
 
     try {
       // Look up user by email
-      const user = await fastify.prisma.user.findUnique({
+      let user = await fastify.prisma.user.findUnique({
         where: { email },
       });
 
       if (!user) {
-        return reply.status(401).send({ message: "Invalid email or password" });
+        await recordAudit(fastify.prisma, {
+          event: 'login_failure',
+          email,
+          request,
+          meta: { reason: 'unknown_email' },
+        });
+        throw new AppError(
+          ErrorCodes.AUTH_INVALID_CREDENTIALS,
+          'Invalid email or password',
+          401,
+        );
+      }
+
+
+      if (user.status === 'disabled') {
+        throw new AppError(
+          ErrorCodes.AUTH_ACCOUNT_DISABLED,
+          'Account is disabled',
+          403,
+        );
+      }
+
+      const now = new Date();
+      if (
+        user.status === 'locked' &&
+        user.lockedUntil &&
+        user.lockedUntil > now
+      ) {
+        throw new AppError(
+          ErrorCodes.AUTH_ACCOUNT_LOCKED,
+          'Account is temporarily locked. Try again later',
+          403,
+        );
+      }
+
+      if (
+        user.status === 'locked' &&
+        (!user.lockedUntil || user.lockedUntil <= now)
+      ) {
+        user = await fastify.prisma.user.update({
+          where: { id: user.id },
+          data: {
+            status: 'active',
+            failedLoginCount: 0,
+            lockedUntil: null,
+          },
+        });
       }
 
       // Verify password
       const isPasswordValid = await bcrypt.compare(password, user.passwordHash);
 
       if (!isPasswordValid) {
-        return reply.status(401).send({ message: "Invalid email or password" });
+        const failedLoginCount = user.failedLoginCount + 1;
+        const shouldLock = failedLoginCount >= env.MAX_FAILED_LOGINS;
+        await fastify.prisma.user.update({
+          where: { id: user.id },
+          data: shouldLock
+            ? {
+                failedLoginCount,
+                status: 'locked',
+                lockedUntil: new Date(
+                  Date.now() + env.ACCOUNT_LOCK_MINUTES * 60_000,
+                ),
+              }
+            : { failedLoginCount },
+        });
+        await recordAudit(fastify.prisma, {
+          event: 'login_failure',
+          userId: user.id,
+          email: user.email,
+          request,
+          meta: { failedLoginCount, locked: shouldLock },
+        });
+        if (shouldLock) {
+          await recordAudit(fastify.prisma, {
+            event: 'account_locked',
+            userId: user.id,
+            email: user.email,
+            request,
+            meta: {
+              failedLoginCount,
+              lockMinutes: env.ACCOUNT_LOCK_MINUTES,
+            },
+          });
+        }
+        throw new AppError(
+          ErrorCodes.AUTH_INVALID_CREDENTIALS,
+          'Invalid email or password',
+          401,
+        );
       }
+
 
       if (!user.emailVerifiedAt) {
-        return reply.status(403).send({ message: 'Email not verified' });
+        throw new AppError(
+          ErrorCodes.AUTH_EMAIL_NOT_VERIFIED,
+          'Email not verified',
+          403,
+        );
       }
 
-      if (user.status !== 'active') {
-        return reply.status(403).send({ message: 'Account is not active' });
+      // Only clear lockout state once login will fully succeed
+      if (user.failedLoginCount > 0 || user.lockedUntil) {
+        await fastify.prisma.user.update({
+          where: { id: user.id },
+          data: {
+            failedLoginCount: 0,
+            lockedUntil: null,
+            status: 'active',
+          },
+        });
       }
 
       // Issue short-lived access token
@@ -406,6 +515,13 @@ export async function authRoutes(fastify: FastifyInstance) {
       // Store refresh token in HttpOnly cookie
       reply.setCookie('refreshToken', refreshToken, refreshCookieOptions);
 
+      await recordAudit(fastify.prisma, {
+        event: 'login_success',
+        userId: user.id,
+        email: user.email,
+        request,
+      });
+
       return reply.status(200).send({
         userId: user.id,
         accessToken,
@@ -415,7 +531,8 @@ export async function authRoutes(fastify: FastifyInstance) {
         message: "Login successful",
       });
     } catch (error) {
-      return reply.status(500).send({ message: "Internal server error" });
+      if (error instanceof AppError) throw error;
+      throw new AppError(ErrorCodes.INTERNAL_ERROR, 'Internal server error', 500);
     }
   });
 
@@ -429,7 +546,7 @@ export async function authRoutes(fastify: FastifyInstance) {
     const refreshToken = request.cookies.refreshToken;
 
     if (!refreshToken) {
-      return reply.status(401).send({ message: 'Unauthorized' });
+      throw new AppError(ErrorCodes.AUTH_UNAUTHORIZED, 'Unauthorized', 401);
     }
 
     try {
@@ -440,7 +557,7 @@ export async function authRoutes(fastify: FastifyInstance) {
 
       
       if (payload.typ !== 'refresh') {
-        return reply.status(401).send({ message: 'Unauthorized' });
+        throw new AppError(ErrorCodes.AUTH_UNAUTHORIZED, 'Unauthorized', 401);
       }
 
       // Look up refresh session by token hash
@@ -450,27 +567,56 @@ export async function authRoutes(fastify: FastifyInstance) {
       });
 
       if (!refreshSession || refreshSession.userId !== payload.sub) {
-        return reply.status(401).send({ message: 'Unauthorized' });
+        throw new AppError(ErrorCodes.AUTH_UNAUTHORIZED, 'Unauthorized', 401);
       }
 
       // Reuse detection: token was already rotated — revoke the whole session chain
       if (refreshSession.replacedById) {
         await revokeSessionChain(fastify.prisma, refreshSession);
         reply.clearCookie('refreshToken', { path: '/api/auth' });
-        return reply.status(401).send({ message: 'Unauthorized' });
+        await recordAudit(fastify.prisma, {
+          event: 'refresh_reuse',
+          userId: refreshSession.userId,
+          request,
+          meta: { sessionId: refreshSession.id },
+        });
+        throw new AppError(ErrorCodes.AUTH_UNAUTHORIZED, 'Unauthorized', 401);
       }
 
       // Normal invalid (logout revoke, expiry)
       if (refreshSession.revokedAt || refreshSession.expiresAt <= new Date()) {
-        return reply.status(401).send({ message: 'Unauthorized' });
+        throw new AppError(ErrorCodes.AUTH_UNAUTHORIZED, 'Unauthorized', 401);
       }
 
       // Confirm the session user still exists
       const user = await fastify.prisma.user.findUnique({
         where: { id: refreshSession.userId },
       });
+
       if (!user) {
-        return reply.status(401).send({ message: 'Unauthorized' });
+        throw new AppError(ErrorCodes.AUTH_UNAUTHORIZED, 'Unauthorized', 401);
+      }
+
+      if (user.status === 'disabled') {
+        reply.clearCookie('refreshToken', { path: '/api/auth' });
+        throw new AppError(
+          ErrorCodes.AUTH_ACCOUNT_DISABLED,
+          'Account is disabled',
+          403,
+        );
+      }
+      
+      if (
+        user.status === 'locked' &&
+        user.lockedUntil &&
+        user.lockedUntil > new Date()
+      ) {
+        reply.clearCookie('refreshToken', { path: '/api/auth' });
+        throw new AppError(
+          ErrorCodes.AUTH_ACCOUNT_LOCKED,
+          'Account is temporarily locked. Try again later',
+          403,
+        );
       }
 
       // Issue a new access token
@@ -521,9 +667,9 @@ export async function authRoutes(fastify: FastifyInstance) {
         message: 'Token refreshed',
       });
     } catch (error) {
-      console.error(error);
+      if (error instanceof AppError) throw error;
       reply.clearCookie('refreshToken', { path: '/api/auth' });
-      return reply.status(401).send({ message: 'Unauthorized' });
+      throw new AppError(ErrorCodes.AUTH_UNAUTHORIZED, 'Unauthorized', 401);
     }
   });
 
@@ -547,7 +693,11 @@ export async function authRoutes(fastify: FastifyInstance) {
       record.usedAt ||
       record.expiresAt <= new Date()
     ) {
-      return reply.status(400).send({ message: 'Invalid or expired verification token' });
+      throw new AppError(
+        ErrorCodes.AUTH_INVALID_TOKEN,
+        'Invalid or expired verification token',
+        400,
+      );
     }
 
     await fastify.prisma.$transaction([
@@ -560,6 +710,12 @@ export async function authRoutes(fastify: FastifyInstance) {
         data: { usedAt: new Date() },
       }),
     ]);
+
+    await recordAudit(fastify.prisma, {
+      event: 'email_verified',
+      userId: record.userId,
+      request,
+    });
 
     return reply.status(200).send({ message: 'Email verified' });
   });
@@ -636,7 +792,22 @@ export async function authRoutes(fastify: FastifyInstance) {
       record.usedAt ||
       record.expiresAt <= new Date()
     ) {
-      return reply.status(400).send({ message: 'Invalid or expired reset token' });
+      throw new AppError(
+        ErrorCodes.AUTH_INVALID_TOKEN,
+        'Invalid or expired reset token',
+        400,
+      );
+    }
+
+    const account = await fastify.prisma.user.findUnique({
+      where: { id: record.userId },
+    });
+    if (!account) {
+      throw new AppError(
+        ErrorCodes.AUTH_INVALID_TOKEN,
+        'Invalid or expired reset token',
+        400,
+      );
     }
 
     const passwordHash = await bcrypt.hash(password, 10);
@@ -644,7 +815,13 @@ export async function authRoutes(fastify: FastifyInstance) {
     await fastify.prisma.$transaction([
       fastify.prisma.user.update({
         where: { id: record.userId },
-        data: { passwordHash },
+        data: {
+          passwordHash,
+          failedLoginCount: 0,
+          lockedUntil: null,
+          // Unlock temporary locks only — never re-activate a disabled account
+          ...(account.status === 'locked' ? { status: 'active' as const } : {}),
+        },
       }),
       fastify.prisma.oneTimeToken.update({
         where: { id: record.id },
@@ -657,6 +834,14 @@ export async function authRoutes(fastify: FastifyInstance) {
     ]);
 
     reply.clearCookie('refreshToken', { path: '/api/auth' });
+
+    await recordAudit(fastify.prisma, {
+      event: 'password_reset',
+      userId: record.userId,
+      email: account.email,
+      request,
+    });
+
     return reply.status(200).send({ message: 'Password reset successful' });
   });
 
@@ -673,16 +858,24 @@ export async function authRoutes(fastify: FastifyInstance) {
 
     const user = await fastify.prisma.user.findUnique({ where: { id: userId } });
     if (!user) {
-      return reply.status(401).send({ message: 'Unauthorized' });
+      throw new AppError(ErrorCodes.AUTH_UNAUTHORIZED, 'Unauthorized', 401);
     }
 
     const valid = await bcrypt.compare(currentPassword, user.passwordHash);
     if (!valid) {
-      return reply.status(401).send({ message: 'Invalid current password' });
+      throw new AppError(
+        ErrorCodes.AUTH_INVALID_CREDENTIALS,
+        'Invalid current password',
+        401,
+      );
     }
 
     if (currentPassword === newPassword) {
-      return reply.status(400).send({ message: 'New password must be different' });
+      throw new AppError(
+        ErrorCodes.AUTH_INVALID_CREDENTIALS,
+        'New password must be different',
+        400,
+      );
     }
 
     const passwordHash = await bcrypt.hash(newPassword, 10);
@@ -702,6 +895,13 @@ export async function authRoutes(fastify: FastifyInstance) {
         data: { revokedAt: new Date() },
       }),
     ]);
+
+    await recordAudit(fastify.prisma, {
+      event: 'password_change',
+      userId,
+      email: user.email,
+      request,
+    });
 
     return reply.status(200).send({ message: 'Password changed' });
   });
@@ -734,6 +934,12 @@ export async function authRoutes(fastify: FastifyInstance) {
           await fastify.prisma.refreshSession.update({
             where: { id: session.id },
             data: { revokedAt: new Date() },
+          });
+          await recordAudit(fastify.prisma, {
+            event: 'logout',
+            userId: session.userId,
+            request,
+            meta: { sessionId: session.id },
           });
         }
       }
@@ -794,7 +1000,7 @@ export async function sessionsRoutes(fastify: FastifyInstance) {
     });
 
     if (!session) {
-      return reply.status(404).send({ message: 'Session not found' });
+      throw new AppError(ErrorCodes.SESSION_NOT_FOUND, 'Session not found', 404);
     }
 
     if (!session.revokedAt) {
@@ -808,6 +1014,13 @@ export async function sessionsRoutes(fastify: FastifyInstance) {
     if (refreshToken && hashRefreshToken(refreshToken) === session.tokenHash) {
       reply.clearCookie('refreshToken', { path: '/api/auth' });
     }
+
+    await recordAudit(fastify.prisma, {
+      event: 'session_revoke',
+      userId,
+      request,
+      meta: { sessionId: session.id },
+    });
 
     return reply.status(200).send({ message: 'Session revoked' });
   });
@@ -827,6 +1040,12 @@ export async function sessionsRoutes(fastify: FastifyInstance) {
         ...(currentTokenHash ? { tokenHash: { not: currentTokenHash } } : {}),
       },
       data: { revokedAt: new Date() },
+    });
+
+    await recordAudit(fastify.prisma, {
+      event: 'session_revoke_others',
+      userId,
+      request,
     });
 
     return reply.status(200).send({ message: 'Other sessions revoked' });
